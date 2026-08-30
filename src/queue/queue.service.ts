@@ -89,15 +89,11 @@ async addJob(
     maxAttempts: options.maxAttempts ?? 10,
   };
 
-  await this.mainQueue.add(
-    type,
-    jobData,
-    {
-      jobId,
-      priority: options.priority,
-      delay: options.delay,
-    },
-  );
+  await this.mainQueue.add(type, jobData, {
+    jobId,
+    priority: options.priority,
+    delay: options.delay,
+  });
 }
 
   private calculateBackoff(
