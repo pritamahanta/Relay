@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
 import { DatabaseModule } from './database/database.module';
+import { QueueModule } from './queue/queue.module';
 import { JobsController } from './api/jobs.controller';
 import { JobsService } from './api/jobs.service';
 
@@ -11,6 +12,7 @@ import { JobsService } from './api/jobs.service';
       isGlobal: true,
     }),
     DatabaseModule,
+    QueueModule,
   ],
   controllers: [JobsController],
   providers: [JobsService],

@@ -7,6 +7,7 @@ import {
 import { JobRepository } from '../database/repositories/job.repository';
 import { CreateJobDto } from './dto/create-job.dto';
 import { JobResponseDto } from './dto/job-response.dto';
+import { QueueService } from '../queue/queue.service';
 
 @Injectable()
 export class JobsService {
@@ -14,10 +15,17 @@ export class JobsService {
 
   constructor(
     private readonly jobRepository: JobRepository,
+    private readonly queueService: QueueService,
   ) {}
 
   async createJob(dto: CreateJobDto): Promise<JobResponseDto> {
     const job = await this.jobRepository.createJob(dto);
+
+    await this.queueService.addJob(
+      job.id,
+      job.type,
+      job.payload,
+    );
 
     this.logger.log(`Job ${job.id} created`);
 
