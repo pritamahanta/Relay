@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JobEntity } from './entities/job.entity';
+import { JobRepository } from './repositories/job.repository';
 
 @Module({
   imports: [
@@ -14,10 +16,14 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
         username: configService.get('DB_USERNAME', 'postgres'),
         password: configService.get('DB_PASSWORD', 'postgres'),
         database: configService.get('DB_NAME', 'job_queue'),
+        entities: [JobEntity],
         synchronize: configService.get('DB_SYNC', true),
         logging: configService.get('DB_LOGGING', false),
       }),
     }),
+    TypeOrmModule.forFeature([JobEntity]),
   ],
+  providers: [JobRepository],
+  exports: [JobRepository,TypeOrmModule],
 })
 export class DatabaseModule {}
