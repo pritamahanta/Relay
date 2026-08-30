@@ -48,8 +48,12 @@ export class JobsService {
         job.id,
         job.type,
         job.payload,
-        job.maxAttempts,
-      );
+      {
+        priority: job.priority,
+        delay: job.delay,
+        maxAttempts: job.maxAttempts,
+      },  
+    );
     } catch (error) {
       this.logger.error(
         `Failed to enqueue job ${job.id}`,

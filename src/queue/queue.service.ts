@@ -71,26 +71,34 @@ export class QueueService
     await this.connection.quit();
   }
 
-  async addJob(
-    jobId: string,
-    type: string,
-    payload: Record<string, any>,
-    maxAttempts = 10,
-  ): Promise<void> {
-    await this.mainQueue.add(
-      type,
-      {
-        jobId,
-        type,
-        payload,
-        attempts: 0,
-        maxAttempts,
-      },
-      {
-        jobId,
-      },
-    );
-  }
+async addJob(
+  jobId: string,
+  type: string,
+  payload: Record<string, any>,
+  options: {
+    priority?: number;
+    delay?: number;
+    maxAttempts?: number;
+  } = {},
+): Promise<void> {
+  const jobData: QueueJobData = {
+    jobId,
+    type,
+    payload,
+    attempts: 0,
+    maxAttempts: options.maxAttempts ?? 10,
+  };
+
+  await this.mainQueue.add(
+    type,
+    jobData,
+    {
+      jobId,
+      priority: options.priority,
+      delay: options.delay,
+    },
+  );
+}
 
   private calculateBackoff(
     attemptNumber: number,
