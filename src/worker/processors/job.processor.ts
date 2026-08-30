@@ -49,11 +49,11 @@ export class JobProcessor {
               await this.processEmailJob(payload);
               break;
 
-            case 'fail':
-              // Temporary failure type used to test retry/DLQ behavior.
-              throw new Error(
-                'Intentional failure for retry testing',
-              );
+            // case 'fail':
+            //   // Temporary failure type used to test retry/DLQ behavior.
+            //   throw new Error(
+            //     'Intentional failure for retry testing',
+            //   );
 
             // case 'slow':
             //   // Temporary slow job used to test timeout behavior.
@@ -152,15 +152,18 @@ export class JobProcessor {
   }
 
   private async processDefaultJob(
-    payload: Record<string, any>,
-  ): Promise<void> {
-    this.logger.log(
-      `Processing job: ${JSON.stringify(payload)}`,
-    );
-
-    // Simulate generic background work.
-    await new Promise((resolve) =>
-      setTimeout(resolve, 500),
-    );
+  payload: Record<string, any>,
+): Promise<void> {
+  if (payload.fail === true) {
+    throw new Error('Intentional failure for testing');
   }
+
+  this.logger.log(
+    `Processing job: ${JSON.stringify(payload)}`,
+  );
+
+  await new Promise((resolve) =>
+    setTimeout(resolve, 500),
+  );
+}
 }

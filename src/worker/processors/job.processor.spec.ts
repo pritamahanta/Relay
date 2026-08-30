@@ -67,8 +67,10 @@ describe('JobProcessor', () => {
     const job = {
       data: {
         jobId: 'job-2',
-        type: 'fail',
-        payload: {},
+        type: 'test',
+        payload: {
+          fail: true,
+        },
         attempts: 0,
         maxAttempts: 3,
       },
@@ -79,7 +81,7 @@ describe('JobProcessor', () => {
     await expect(
       processor.process(job),
     ).rejects.toThrow(
-      'Intentional failure for retry testing',
+      'Intentional failure for testing',
     );
 
     expect(
@@ -87,8 +89,15 @@ describe('JobProcessor', () => {
     ).toHaveBeenCalledWith('job-2');
 
     expect(
+      jobRepository.markAsProcessing,
+    ).toHaveBeenCalledWith('job-2');
+
+    expect(
       jobRepository.markAsFailed,
-    ).toHaveBeenCalled();
+    ).toHaveBeenCalledWith(
+      'job-2',
+      'Intentional failure for testing',
+    );
 
     expect(
       queueService.retryJob,
@@ -103,8 +112,10 @@ describe('JobProcessor', () => {
     const job = {
       data: {
         jobId: 'job-3',
-        type: 'fail',
-        payload: {},
+        type: 'test',
+        payload: {
+          fail: true,
+        },
         attempts: 2,
         maxAttempts: 3,
       },
@@ -115,7 +126,22 @@ describe('JobProcessor', () => {
     await expect(
       processor.process(job),
     ).rejects.toThrow(
-      'Intentional failure for retry testing',
+      'Intentional failure for testing',
+    );
+
+    expect(
+      jobRepository.incrementAttempts,
+    ).toHaveBeenCalledWith('job-3');
+
+    expect(
+      jobRepository.markAsProcessing,
+    ).toHaveBeenCalledWith('job-3');
+
+    expect(
+      jobRepository.markAsFailed,
+    ).toHaveBeenCalledWith(
+      'job-3',
+      'Intentional failure for testing',
     );
 
     expect(
@@ -126,7 +152,7 @@ describe('JobProcessor', () => {
       queueService.moveToDLQ,
     ).toHaveBeenCalledWith(
       job,
-      'Intentional failure for retry testing',
+      'Intentional failure for testing',
     );
   });
 });
