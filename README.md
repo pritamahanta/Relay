@@ -1,114 +1,488 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Distributed Job Queue System
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A production-ready asynchronous job queue system built with NestJS, PostgreSQL, Redis, and BullMQ. Supports job prioritization, retry with exponential backoff, idempotent submissions, and graceful shutdown.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Architecture
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ pnpm install
+```
+┌─────────────┐
+│   Client    │
+└──────┬──────┘
+       │ HTTP
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│              NestJS API Server                          │
+│  ┌────────────────┐         ┌──────────────────┐      │
+│  │  JobsController│────────▶│  JobsService     │      │
+│  └────────────────┘         └────────┬─────────┘      │
+│                                      │                │
+│  ┌──────────────┐            ┌──────▼──────────┐     │
+│  │              │            │  JobRepository  │     │
+│  │  (validate,  │            │  (persistence)  │     │
+│  │   idempotent)│            └──────┬──────────┘     │
+│  └──────────────┘                   │                │
+└────────┬──────────────────────────────┬───────────────┘
+         │                              │
+         │ enqueue                      │ query
+         ▼                              ▼
+    ┌─────────────┐            ┌──────────────────┐
+    │   Redis     │            │  PostgreSQL      │
+    │  (BullMQ)   │            │  (job store)     │
+    └──────┬──────┘            └──────────────────┘
+           │
+           │ consume
+           ▼
+    ┌──────────────────────────────────────┐
+    │       Worker Process                 │
+    │  ┌──────────────────────────────┐   │
+    │  │  JobProcessor                │   │
+    │  │  - execute job              │   │
+    │  │  - handle timeout (60s)     │   │
+    │  │  - emit success/failure     │   │
+    │  └──────────────┬───────────────┘   │
+    │                 │                    │
+    │  ┌──────────────▼───────────────┐   │
+    │  │  Retry & Dead-Letter Queue   │   │
+    │  │  - exponential backoff       │   │
+    │  │  - dead-letter on max fails  │   │
+    │  └──────────────────────────────┘   │
+    └──────────────────────────────────────┘
+           │
+           │ status updates
+           ▼
+    ┌──────────────────────────────────┐
+    │ PostgreSQL (job state & results) │
+    └──────────────────────────────────┘
 ```
 
-## Compile and run the project
+## Components
 
-```bash
-# development
-$ pnpm run start
+### API Server (`src/api/`)
+- **JobsController**: HTTP endpoints for creating and querying jobs
+- **JobsService**: Business logic for job creation, idempotency checking, and status retrieval
+- **CreateJobDto**: Input validation for job submissions
+- **JobResponseDto**: Structured response format
 
-# watch mode
-$ pnpm run start:dev
+### Database (`src/database/`)
+- **JobEntity**: Represents a job record in PostgreSQL, including status, attempts, priority, and idempotency key
+- **JobRepository**: Data access layer providing CRUD operations and status transitions via TypeORM
 
-# production mode
-$ pnpm run start:prod
+### Queue Service (`src/queue/`)
+- **QueueService**: Manages BullMQ queues (main queue and dead-letter queue)
+- Handles job enqueueing with priority and delay
+- Implements exponential backoff retry calculation
+- Manages dead-letter queue transitions
+
+### Worker (`src/worker/`)
+- **WorkerService**: Lifecycle management for the worker process with shutdown hooks
+- **JobProcessor**: Executes jobs with built-in timeout enforcement
+- Tracks execution attempts and status transitions
+- Routes failed jobs to retry or dead-letter queue
+
+## Job Lifecycle
+
+### Success Path
+```
+QUEUED → PROCESSING → COMPLETED
 ```
 
-## Run tests
+A job begins in the QUEUED state, transitions to PROCESSING when the worker picks it up, and moves to COMPLETED upon successful execution.
 
-```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+### Failure and Retry Path
+```
+PROCESSING → FAILED → (retry with backoff) → PROCESSING → ...
 ```
 
-## Deployment
+When a job fails and attempts remain, it is rescheduled with exponential backoff delay and retried.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+### Dead-Letter Queue (DLQ) Path
+```
+PROCESSING → FAILED → (max attempts exceeded) → DEAD_LETTER
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+After exhausting all retry attempts, the job is moved to the dead-letter queue for inspection and manual intervention.
 
-## Observability
+## Retry Strategy & Exponential Backoff
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+Retry logic uses **exponential backoff** with the formula:
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+```
+delay_ms = 1000 * 2^attemptNumber
+```
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+Examples:
+- Attempt 0 (1st failure): 1,000 ms delay
+- Attempt 1 (2nd failure): 2,000 ms delay
+- Attempt 2 (3rd failure): 4,000 ms delay
+- Attempt 3 (4th failure): 8,000 ms delay
 
-## Resources
+**Default max attempts**: 10 (configurable per job via `maxAttempts` field)
 
-Check out a few resources that may come in handy when working with NestJS:
+## Attempt Tracking
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+Each job tracks:
+- **attempts**: Current execution attempt count (incremented before each execution attempt)
+- **maxAttempts**: Maximum number of retry attempts (default: 10)
 
-## Support
+The worker increments `attempts` at the start of each execution. If execution fails and `attempts < maxAttempts`, the job is requeued with backoff. Otherwise, it moves to the dead-letter queue.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Dead-Letter Queue (DLQ)
 
-## Stay in touch
+Failed jobs that exhaust all retry attempts are moved to a separate dead-letter queue in Redis for inspection. They are also persisted in PostgreSQL with status `DEAD_LETTER` and the error message. This allows manual inspection, debugging, and optional manual reprocessing.
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+## Idempotency
+
+Idempotent job submission is enforced at the **application and database levels**:
+
+- **Application level**: When a job is submitted with an `idempotencyKey`, the JobsService checks for an existing job with that key before creating a new one. If found, it returns the existing job instead of creating a duplicate.
+- **Database level**: The `idempotencyKey` column has a unique index (`WHERE "idempotencyKey" IS NOT NULL`), preventing duplicate entries even in concurrent scenarios.
+
+This guarantees that the same logical work (identified by an idempotency key) will not be queued multiple times.
+
+## Job Priority
+
+Jobs support four priority levels defined in `JobPriority` enum:
+
+| Priority  | Value |
+|-----------|-------|
+| CRITICAL  | 1     |
+| HIGH      | 5     |
+| NORMAL    | 10    |
+| LOW       | 20    |
+
+Lower numeric values indicate higher priority. BullMQ processes jobs in priority order.
+
+## Job Execution Timeout
+
+Each job has a **60-second execution timeout** (`JOB_TIMEOUT = 60,000 ms`) enforced via `Promise.race()`.
+
+**Important limitation**: The timeout using `Promise.race()` does not cancel the underlying Promise. If a job exceeds the timeout, a rejection is thrown and the job is marked as failed, but the underlying work continues to execute in the background. This is a fundamental limitation of Promise-based timeouts in JavaScript.
+
+Example:
+- Job submitted with `delay: 5000` → starts execution after 5 seconds
+- Job execution begins → timeout starts counting
+- If job takes > 60 seconds → timeout error is thrown → job marked as failed
+- Underlying promise continues executing in background (no cancellation)
+
+## Worker Concurrency
+
+The worker process handles multiple jobs concurrently. The concurrency level is configurable via the `WORKER_CONCURRENCY` environment variable (default: 5 concurrent jobs).
+
+**Separate processes**: The API server and worker are separate processes for resource isolation and independent scaling:
+- **API process**: Handles HTTP requests and job enqueueing
+- **Worker process**: Processes jobs from the queue
+
+This separation allows:
+- Independent scaling of job intake vs. processing capacity
+- Fault isolation (worker crashes don't bring down the API)
+- Dedicated resource allocation for long-running job execution
+
+## Graceful Shutdown
+
+Both API and worker processes implement graceful shutdown:
+
+- **API process**: Uses NestJS built-in shutdown hooks
+- **Worker process**: Calls `app.enableShutdownHooks()` to listen for SIGTERM/SIGINT, allowing:
+  - Worker to stop accepting new jobs
+  - Ongoing jobs to complete or timeout
+  - Connections (database, Redis) to close cleanly
+
+## Repository Pattern
+
+The `JobRepository` provides an abstraction layer over TypeORM and PostgreSQL:
+
+- Encapsulates all database queries and mutations
+- Provides named methods for domain operations (`markAsCompleted`, `markAsProcessing`, etc.)
+- Centralizes job persistence logic
+- Enables testing via mock repository implementations
+
+## Directory Structure
+
+```
+distributed-job-queue/
+├── src/
+│   ├── api/                      # HTTP API layer
+│   │   ├── jobs.controller.ts    # REST endpoints
+│   │   ├── jobs.service.ts       # Business logic
+│   │   ├── jobs.service.spec.ts  # Unit tests
+│   │   └── dto/
+│   │       ├── create-job.dto.ts
+│   │       └── job-response.dto.ts
+│   ├── database/                 # Data persistence
+│   │   ├── database.module.ts    # TypeORM configuration
+│   │   ├── entities/
+│   │   │   └── job.entity.ts     # JobEntity (PostgreSQL schema)
+│   │   └── repositories/
+│   │       └── job.repository.ts # Job CRUD & persistence
+│   ├── queue/                    # Job queueing
+│   │   ├── queue.module.ts
+│   │   └── queue.service.ts      # BullMQ & Redis integration
+│   ├── worker/                   # Job execution
+│   │   ├── worker.module.ts
+│   │   ├── worker.service.ts     # Worker lifecycle
+│   │   └── processors/
+│   │       ├── job.processor.ts  # Job execution logic
+│   │       └── job.processor.spec.ts # Unit tests
+│   ├── shared/
+│   │   ├── constants.ts          # JOB_TIMEOUT
+│   │   └── enums/
+│   │       ├── job-status.enum.ts
+│   │       └── job-priority.enum.ts
+│   ├── app.module.ts             # Root module
+│   ├── app.controller.ts
+│   ├── app.service.ts
+│   ├── main.ts                   # API server entry point
+│   └── worker-main.ts            # Worker entry point
+├── test/
+│   └── jest-e2e.json             # E2E test configuration
+├── infra/
+│   ├── Dockerfile                # Multi-stage build
+│   └── docker-compose.yml        # Production environment
+├── docker-compose.dev.yml        # Development environment
+├── package.json                  # Dependencies & scripts
+└── tsconfig.json                 # TypeScript configuration
+```
+
+## Local Development
+
+### Prerequisites
+- Node.js 24+ (Alpine compatible)
+- pnpm 9+
+- Docker & Docker Compose (for PostgreSQL and Redis)
+
+### Setup
+
+1. Install dependencies:
+```bash
+pnpm install
+```
+
+2. Start PostgreSQL and Redis:
+```bash
+docker-compose -f docker-compose.dev.yml up -d
+```
+
+3. In one terminal, start the API server:
+```bash
+pnpm run start:dev
+```
+
+4. In another terminal, start the worker:
+```bash
+pnpm run start:worker:dev
+```
+
+The API will be available at `http://localhost:3000`.
+
+### Development Commands
+
+```bash
+# Start API in watch mode
+pnpm run start:dev
+
+# Start worker in watch mode
+pnpm run start:worker:dev
+
+# Lint code
+pnpm run lint
+
+# Format code
+pnpm run format
+
+# Run unit tests
+pnpm run test
+
+# Run unit tests in watch mode
+pnpm run test:watch
+
+# View test coverage
+pnpm run test:cov
+```
+
+## Docker
+
+### Build
+
+The `infra/Dockerfile` uses a multi-stage build to minimize final image size:
+1. **Builder stage**: Installs dependencies and compiles TypeScript to JavaScript
+2. **Runner stage**: Uses only production dependencies
+
+```bash
+docker build -f infra/Dockerfile -t distributed-job-queue .
+```
+
+### Production Deployment with Docker Compose
+
+The `infra/docker-compose.yml` defines four services:
+
+| Service | Purpose |
+|---------|---------|
+| **postgres** | PostgreSQL 16 database for job persistence |
+| **redis** | Redis 7 queue backend for BullMQ |
+| **api** | NestJS API server (port 3000) |
+| **worker** | Job processing worker (consumer of main queue) |
+
+Start the full stack:
+```bash
+docker-compose -f infra/docker-compose.yml up -d
+```
+
+#### Environment Variables
+
+**API Service**:
+- `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` – PostgreSQL connection
+- `REDIS_HOST`, `REDIS_PORT` – Redis connection
+- `NODE_ENV` – Set to `production`
+- `PORT` – API server port (default: 3000)
+
+**Worker Service**:
+- `DB_*` – PostgreSQL connection (same as API)
+- `REDIS_HOST`, `REDIS_PORT` – Redis connection
+- `WORKER_CONCURRENCY` – Number of concurrent job processors (default: 5)
+
+#### Health Checks
+
+Both PostgreSQL and Redis include health checks. The API and worker depend on their health, ensuring the system is ready before processing requests or jobs.
+
+## REST API
+
+### Create a Job
+
+**Endpoint**: `POST /jobs`
+
+**Request Body**:
+```json
+{
+  "type": "email",
+  "payload": {
+    "to": "user@example.com",
+    "subject": "Welcome",
+    "body": "Hello!"
+  },
+  "idempotencyKey": "unique-key-12345",
+  "priority": 5,
+  "maxAttempts": 3,
+  "delay": 5000
+}
+```
+
+**Parameters**:
+- `type` (string, required): Job type identifier (e.g., `email`)
+- `payload` (object, required): Job data passed to the processor
+- `idempotencyKey` (string, optional): Unique key for idempotent submissions
+- `priority` (number, optional): Priority level (1=CRITICAL, 5=HIGH, 10=NORMAL, 20=LOW). Default: 10
+- `maxAttempts` (number, optional): Maximum retry attempts. Default: 10
+- `delay` (number, optional): Delay in milliseconds before starting the job
+
+**Response** (HTTP 201):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "email",
+  "status": "QUEUED",
+  "priority": 5,
+  "attempts": 0,
+  "maxAttempts": 3,
+  "createdAt": "2026-08-30T10:15:30.000Z",
+  "updatedAt": "2026-08-30T10:15:30.000Z",
+  "processedAt": null,
+  "completedAt": null,
+  "error": null
+}
+```
+
+**Example with curl**:
+```bash
+curl -X POST http://localhost:3000/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "email",
+    "payload": {"to": "user@example.com"},
+    "idempotencyKey": "email-12345",
+    "priority": 5,
+    "maxAttempts": 3
+  }'
+```
+
+### Get Job Status
+
+**Endpoint**: `GET /jobs/:id`
+
+**Response**:
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "email",
+  "status": "COMPLETED",
+  "priority": 5,
+  "attempts": 1,
+  "maxAttempts": 3,
+  "createdAt": "2026-08-30T10:15:30.000Z",
+  "updatedAt": "2026-08-30T10:15:35.000Z",
+  "processedAt": "2026-08-30T10:15:31.000Z",
+  "completedAt": "2026-08-30T10:15:35.000Z",
+  "error": null
+}
+```
+
+**Example with curl**:
+```bash
+curl http://localhost:3000/jobs/550e8400-e29b-41d4-a716-446655440000
+```
+
+## Testing
+
+### Unit Tests
+
+```bash
+# Run unit tests
+pnpm run test
+
+# Run in watch mode
+pnpm run test:watch
+
+# Generate coverage report
+pnpm run test:cov
+```
+
+**Test Coverage**:
+- `jobs.service.spec.ts`: Tests job creation, idempotency detection, and status retrieval
+- `job.processor.spec.ts`: Tests job execution, retry logic, and dead-letter queue transitions
+
+**Example Tests**:
+- ✅ Creating and enqueueing a job
+- ✅ Idempotent job submission (returns existing job)
+- ✅ Job status retrieval
+- ✅ Successful job completion
+- ✅ Retry on failure with remaining attempts
+- ✅ Dead-letter queue transition when max attempts exceeded
+
+### E2E Tests
+
+```bash
+pnpm run test:e2e
+```
+
+E2E tests use the Jest configuration in `test/jest-e2e.json`.
+
+## Technology Stack
+
+| Component | Technology | Version |
+|-----------|-----------|---------|
+| **Runtime** | Node.js | 24 (Alpine) |
+| **Framework** | NestJS | 11.x |
+| **Language** | TypeScript | 5.7.x |
+| **Database** | PostgreSQL | 16 |
+| **ORM** | TypeORM | 0.3.x |
+| **Queue** | BullMQ | 5.81.x |
+| **Cache/Queue Backend** | Redis | 7 |
+| **Redis Client** | ioredis | 5.11.x |
+| **Logging** | Pino | 10.x |
+| **Package Manager** | pnpm | 9.x |
+| **Testing** | Jest | 30.x |
+| **Linting** | ESLint | 9.x |
+| **Formatting** | Prettier | 3.x |
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+UNLICENSED
