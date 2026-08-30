@@ -25,6 +25,7 @@ export class JobsService {
       job.id,
       job.type,
       job.payload,
+      job.maxAttempts,
     );
 
     this.logger.log(`Job ${job.id} created`);
