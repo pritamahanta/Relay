@@ -1,11 +1,4 @@
-import {
-  Entity,
-  Column,
-  PrimaryColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  Index,
-} from 'typeorm';
+import { Entity, Column, PrimaryColumn, CreateDateColumn, UpdateDateColumn, Index} from 'typeorm';
 import { JobStatus } from '../../shared/enums/job-status.enum';
 import { JobPriority } from '../../shared/enums/job-priority.enum';
 
