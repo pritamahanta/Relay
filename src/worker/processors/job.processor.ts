@@ -7,6 +7,7 @@ import {
 } from '../../queue/queue.service';
 
 import { JobRepository } from '../../database/repositories/job.repository';
+import { JOB_TIMEOUT } from '../../shared/constants';
 
 @Injectable()
 export class JobProcessor {
@@ -28,7 +29,7 @@ export class JobProcessor {
 
     const executionAttempt = attempts + 1;
 
-    // Persist that this attempt has actually started.
+    // Persist that this execution attempt has started.
     await this.jobRepository.incrementAttempts(jobId);
 
     this.logger.log(
@@ -40,20 +41,32 @@ export class JobProcessor {
     await this.jobRepository.markAsProcessing(jobId);
 
     try {
-      switch (type) {
-        case 'email':
-          await this.processEmailJob(payload);
-          break;
+      await this.executeWithTimeout(
+        jobId,
+        (async () => {
+          switch (type) {
+            case 'email':
+              await this.processEmailJob(payload);
+              break;
 
-        case 'fail':
-          // Temporary failure type used to verify retry/DLQ behavior.
-          throw new Error(
-            'Intentional failure for retry testing',
-          );
+            case 'fail':
+              // Temporary failure type used to test retry/DLQ behavior.
+              throw new Error(
+                'Intentional failure for retry testing',
+              );
 
-        default:
-          await this.processDefaultJob(payload);
-      }
+            // case 'slow':
+            //   // Temporary slow job used to test timeout behavior.
+            //   await new Promise((resolve) =>
+            //     setTimeout(resolve, 10_000),
+            //   );
+            //   break;
+
+            default:
+              await this.processDefaultJob(payload);
+          }
+        })(),
+      );
 
       await this.jobRepository.markAsCompleted(jobId);
 
@@ -97,6 +110,31 @@ export class JobProcessor {
 
       // Tell BullMQ that the current queue execution failed.
       throw error;
+    }
+  }
+
+  private async executeWithTimeout(
+    jobId: string,
+    work: Promise<void>,
+  ): Promise<void> {
+    let timeoutId: NodeJS.Timeout | undefined;
+
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(
+          new Error(
+            `Job ${jobId} timed out after ${JOB_TIMEOUT}ms`,
+          ),
+        );
+      }, JOB_TIMEOUT);
+    });
+
+    try {
+      await Promise.race([work, timeout]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 

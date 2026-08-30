@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 
 import { JobEntity } from '../entities/job.entity';
 import { JobStatus } from '../../shared/enums/job-status.enum';
@@ -23,7 +23,7 @@ export class JobRepository {
     delay?: number;
   }): Promise<JobEntity> {
     const job = this.repository.create({
-      id: uuidv4(),
+      id: randomUUID(),
       type: data.type,
       payload: data.payload,
       idempotencyKey: data.idempotencyKey,

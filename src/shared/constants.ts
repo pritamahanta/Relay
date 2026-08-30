@@ -1,0 +1,1 @@
+export const JOB_TIMEOUT = 60_000;
