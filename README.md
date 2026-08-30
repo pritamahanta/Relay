@@ -485,4 +485,6 @@ E2E tests use the Jest configuration in `test/jest-e2e.json`.
 
 ## License
 
-UNLICENSED
+This project is **private and unlicensed**. All source code and materials are proprietary and confidential. No rights are granted to copy, modify, distribute, or use this software without explicit written permission.
+
+See [LICENSE](LICENSE) for details.
