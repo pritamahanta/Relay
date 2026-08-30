@@ -5,54 +5,32 @@ A production-ready asynchronous job queue system built with NestJS, PostgreSQL, 
 ## Architecture
 
 ```
-┌─────────────┐
-│   Client    │
-└──────┬──────┘
-       │ HTTP
-       ▼
-┌─────────────────────────────────────────────────────────┐
-│              NestJS API Server                          │
-│  ┌────────────────┐         ┌──────────────────┐      │
-│  │  JobsController│────────▶│  JobsService     │      │
-│  └────────────────┘         └────────┬─────────┘      │
-│                                      │                │
-│  ┌──────────────┐            ┌──────▼──────────┐     │
-│  │              │            │  JobRepository  │     │
-│  │  (validate,  │            │  (persistence)  │     │
-│  │   idempotent)│            └──────┬──────────┘     │
-│  └──────────────┘                   │                │
-└────────┬──────────────────────────────┬───────────────┘
-         │                              │
-         │ enqueue                      │ query
-         ▼                              ▼
-    ┌─────────────┐            ┌──────────────────┐
-    │   Redis     │            │  PostgreSQL      │
-    │  (BullMQ)   │            │  (job store)     │
-    └──────┬──────┘            └──────────────────┘
-           │
-           │ consume
-           ▼
-    ┌──────────────────────────────────────┐
-    │       Worker Process                 │
-    │  ┌──────────────────────────────┐   │
-    │  │  JobProcessor                │   │
-    │  │  - execute job              │   │
-    │  │  - handle timeout (60s)     │   │
-    │  │  - emit success/failure     │   │
-    │  └──────────────┬───────────────┘   │
-    │                 │                    │
-    │  ┌──────────────▼───────────────┐   │
-    │  │  Retry & Dead-Letter Queue   │   │
-    │  │  - exponential backoff       │   │
-    │  │  - dead-letter on max fails  │   │
-    │  └──────────────────────────────┘   │
-    └──────────────────────────────────────┘
-           │
-           │ status updates
-           ▼
-    ┌──────────────────────────────────┐
-    │ PostgreSQL (job state & results) │
-    └──────────────────────────────────┘
+                 ┌──────────────┐
+                 │    Client    │
+                 └──────┬───────┘
+                        │ HTTP
+                        ▼
+                 ┌──────────────┐
+                 │  NestJS API  │
+                 └──────┬───────┘
+                        │
+              ┌─────────┴─────────┐
+              │                   │
+              ▼                   ▼
+       ┌────────────┐      ┌─────────────┐
+       │ PostgreSQL │      │ Redis/BullMQ│
+       │ Job State  │      │    Queue    │
+       └──────▲─────┘      └──────┬──────┘
+              │                   │
+              │ status            │ consume
+              │ updates            ▼
+              │            ┌──────────────┐
+              └────────────│    Worker    │
+                           │              │
+                           │ JobProcessor │
+                           │ Retry / DLQ  │
+                           │ Timeout      │
+                           └──────────────┘
 ```
 
 ## Components
