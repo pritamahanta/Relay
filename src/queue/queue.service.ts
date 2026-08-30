@@ -152,8 +152,6 @@ async addJob(
     10,
   );
 
-  console.log('Worker concurrency:', concurrency);
-
   return new Worker<QueueJobData>(
     MAIN_QUEUE,
     processor,
