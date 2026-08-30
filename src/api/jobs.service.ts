@@ -1,13 +1,15 @@
 import {
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 
 import { JobRepository } from '../database/repositories/job.repository';
+import { QueueService } from '../queue/queue.service';
+
 import { CreateJobDto } from './dto/create-job.dto';
 import { JobResponseDto } from './dto/job-response.dto';
-import { QueueService } from '../queue/queue.service';
 
 @Injectable()
 export class JobsService {
@@ -18,32 +20,69 @@ export class JobsService {
     private readonly queueService: QueueService,
   ) {}
 
-  async createJob(dto: CreateJobDto): Promise<JobResponseDto> {
+  async createJob(
+    dto: CreateJobDto,
+  ): Promise<JobResponseDto> {
+    // Check whether this request was already processed.
+    if (dto.idempotencyKey) {
+      const existing =
+        await this.jobRepository.findByIdempotencyKey(
+          dto.idempotencyKey,
+        );
+
+      if (existing) {
+        this.logger.log(
+          `Idempotent request detected: ${dto.idempotencyKey}`,
+        );
+
+        return this.mapToResponse(existing);
+      }
+    }
+
+    // Create the persistent job first.
     const job = await this.jobRepository.createJob(dto);
 
-    await this.queueService.addJob(
-      job.id,
-      job.type,
-      job.payload,
-      job.maxAttempts,
-    );
+    try {
+      // Then enqueue the job.
+      await this.queueService.addJob(
+        job.id,
+        job.type,
+        job.payload,
+        job.maxAttempts,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to enqueue job ${job.id}`,
+      );
 
-    this.logger.log(`Job ${job.id} created`);
+      throw error;
+    }
+
+    this.logger.log(
+      `Job ${job.id} created and queued`,
+    );
 
     return this.mapToResponse(job);
   }
 
-  async getJobStatus(jobId: string): Promise<JobResponseDto> {
-    const job = await this.jobRepository.findById(jobId);
+  async getJobStatus(
+    jobId: string,
+  ): Promise<JobResponseDto> {
+    const job =
+      await this.jobRepository.findById(jobId);
 
     if (!job) {
-      throw new NotFoundException(`Job ${jobId} not found`);
+      throw new NotFoundException(
+        `Job ${jobId} not found`,
+      );
     }
 
     return this.mapToResponse(job);
   }
 
-  private mapToResponse(job: any): JobResponseDto {
+  private mapToResponse(
+    job: any,
+  ): JobResponseDto {
     return {
       id: job.id,
       type: job.type,
