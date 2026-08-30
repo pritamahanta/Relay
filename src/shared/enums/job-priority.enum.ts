@@ -1,6 +1,6 @@
 export enum JobPriority {
-  LOW = 1,
-  NORMAL = 5,
-  HIGH = 10,
-  CRITICAL = 20,
+  LOW = 20,
+  NORMAL = 10,
+  HIGH = 5,
+  CRITICAL = 1,
 }

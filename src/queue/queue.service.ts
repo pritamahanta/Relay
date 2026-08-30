@@ -142,24 +142,25 @@ async addJob(
     );
   }
 
-  createWorker(
-    processor: (
-      job: Job<QueueJobData>,
-    ) => Promise<void>,
-  ): Worker<QueueJobData> {
-    return new Worker<QueueJobData>(
-      MAIN_QUEUE,
-      processor,
-      {
-        connection: this.connection,
-        concurrency: parseInt(
-          this.configService.get(
-            'WORKER_CONCURRENCY',
-            '5',
-          ),
-          10,
-        ),
-      },
-    );
-  }
+ createWorker(
+  processor: (
+    job: Job<QueueJobData>,
+  ) => Promise<void>,
+): Worker<QueueJobData> {
+  const concurrency = parseInt(
+    this.configService.get('WORKER_CONCURRENCY', '5'),
+    10,
+  );
+
+  console.log('Worker concurrency:', concurrency);
+
+  return new Worker<QueueJobData>(
+    MAIN_QUEUE,
+    processor,
+    {
+      connection: this.connection,
+      concurrency,
+    },
+  );
+}
 }
