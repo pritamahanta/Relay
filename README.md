@@ -1,362 +1,95 @@
 # Distributed Job Queue System
 
-A production-ready asynchronous job queue system built with NestJS, PostgreSQL, Redis, and BullMQ. Supports job prioritization, retry with exponential backoff, idempotent submissions, and graceful shutdown.
+Asynchronous job processing with NestJS, PostgreSQL, Redis, BullMQ, and an optional Gemini-backed LLM inference workflow with semantic caching.
+
+## Features
+
+- Separate API and worker processes for independent scaling.
+- BullMQ main queue backed by Redis.
+- Job priorities: `CRITICAL` (1), `HIGH` (5), `NORMAL` (10), and `LOW` (20).
+- Delayed jobs with a delay in milliseconds.
+- Retry with exponential backoff: `1000 * 2^attemptNumber` milliseconds.
+- Dead-letter queue after `maxAttempts` is exhausted.
+- Application and database-level idempotency using `idempotencyKey`.
+- PostgreSQL persistence for job state, attempts, errors, timestamps, and results.
+- 60-second execution timeout using `Promise.race()`.
+- Configurable worker concurrency.
+- DTO validation with `class-validator`; unknown request fields are rejected.
+- Structured logging through NestJS and Pino dependencies.
+- `llm-inference` jobs using Gemini embeddings and text generation.
+- Semantic LLM cache using pgvector cosine similarity, TTL expiration, and an IVFFlat index.
+- In-memory Gemini rate limiting at 12 requests per 60-second window per worker process.
+- Graceful worker shutdown through NestJS shutdown hooks.
 
 ## Architecture
 
-```
-                 ┌──────────────┐
-                 │    Client    │
-                 └──────┬───────┘
-                        │ HTTP
-                        ▼
-                 ┌──────────────┐
-                 │  NestJS API  │
-                 └──────┬───────┘
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-              ▼                   ▼
-       ┌────────────┐      ┌─────────────┐
-       │ PostgreSQL │      │ Redis/BullMQ│
-       │ Job State  │      │    Queue    │
-       └──────▲─────┘      └──────┬──────┘
-              │                   │
-              │ status            │ consume
-              │ updates            ▼
-              │            ┌──────────────┐
-              └────────────│    Worker    │
-                           │              │
-                           │ JobProcessor │
-                           │ Retry / DLQ  │
-                           │ Timeout      │
-                           └──────────────┘
+```text
+Client -> NestJS API -> PostgreSQL (job state)
+                   -> Redis/BullMQ (main queue)
+
+Worker <- Redis/BullMQ
+   |-> PostgreSQL (status, attempts, result, errors)
+   |-> Gemini API (llm-inference jobs)
+   `-> PostgreSQL/pgvector (semantic cache)
 ```
 
-## Components
+The API creates the PostgreSQL record before enqueueing the BullMQ job. The worker increments attempts, marks the job as processing, executes it, and marks it completed, failed, or dead-lettered.
 
-### API Server (`src/api/`)
-- **JobsController**: HTTP endpoints for creating and querying jobs
-- **JobsService**: Business logic for job creation, idempotency checking, and status retrieval
-- **CreateJobDto**: Input validation for job submissions
-- **JobResponseDto**: Structured response format
+## Features by Job Type
 
-### Database (`src/database/`)
-- **JobEntity**: Represents a job record in PostgreSQL, including status, attempts, priority, and idempotency key
-- **JobRepository**: Data access layer providing CRUD operations and status transitions via TypeORM
+### Generic jobs
 
-### Queue Service (`src/queue/`)
-- **QueueService**: Manages BullMQ queues (main queue and dead-letter queue)
-- Handles job enqueueing with priority and delay
-- Implements exponential backoff retry calculation
-- Manages dead-letter queue transitions
+Any type other than `email` and `llm-inference` uses the default processor. The payload must be an object. Set `payload.fail` to `true` to intentionally fail a job during local retry/DLQ testing.
 
-### Worker (`src/worker/`)
-- **WorkerService**: Lifecycle management for the worker process with shutdown hooks
-- **JobProcessor**: Executes jobs with built-in timeout enforcement
-- Tracks execution attempts and status transitions
-- Routes failed jobs to retry or dead-letter queue
+### `email`
 
-## Job Lifecycle
+Logs the recipient in `payload.to` and simulates email processing for one second.
 
-### Success Path
-```
-QUEUED → PROCESSING → COMPLETED
-```
+### `llm-inference`
 
-A job begins in the QUEUED state, transitions to PROCESSING when the worker picks it up, and moves to COMPLETED upon successful execution.
+Requires a non-empty `payload.prompt`. The worker:
 
-### Failure and Retry Path
-```
-PROCESSING → FAILED → (retry with backoff) → PROCESSING → ...
-```
+1. Generates a 768-dimensional Gemini embedding.
+2. Searches non-expired pgvector cache entries using cosine similarity.
+3. Returns the cached response when similarity meets `CACHE_SIMILARITY_THRESHOLD`.
+4. Calls Gemini on a cache miss and stores the response for `CACHE_TTL_MS`.
 
-When a job fails and attempts remain, it is rescheduled with exponential backoff delay and retried.
+The job result contains `response`, `cacheHit`, and, for cache hits, `similarity`.
 
-### Dead-Letter Queue (DLQ) Path
-```
-PROCESSING → FAILED → (max attempts exceeded) → DEAD_LETTER
-```
+## API
 
-After exhausting all retry attempts, the job is moved to the dead-letter queue for inspection and manual intervention.
+### Create a job
 
-## Retry Strategy & Exponential Backoff
+`POST /jobs`
 
-Retry logic uses **exponential backoff** with the formula:
-
-```
-delay_ms = 1000 * 2^attemptNumber
-```
-
-Examples:
-- Attempt 0 (1st failure): 1,000 ms delay
-- Attempt 1 (2nd failure): 2,000 ms delay
-- Attempt 2 (3rd failure): 4,000 ms delay
-- Attempt 3 (4th failure): 8,000 ms delay
-
-**Default max attempts**: 10 (configurable per job via `maxAttempts` field)
-
-## Attempt Tracking
-
-Each job tracks:
-- **attempts**: Current execution attempt count (incremented before each execution attempt)
-- **maxAttempts**: Maximum number of retry attempts (default: 10)
-
-The worker increments `attempts` at the start of each execution. If execution fails and `attempts < maxAttempts`, the job is requeued with backoff. Otherwise, it moves to the dead-letter queue.
-
-## Dead-Letter Queue (DLQ)
-
-Failed jobs that exhaust all retry attempts are moved to a separate dead-letter queue in Redis for inspection. They are also persisted in PostgreSQL with status `DEAD_LETTER` and the error message. This allows manual inspection, debugging, and optional manual reprocessing.
-
-## Idempotency
-
-Idempotent job submission is enforced at the **application and database levels**:
-
-- **Application level**: When a job is submitted with an `idempotencyKey`, the JobsService checks for an existing job with that key before creating a new one. If found, it returns the existing job instead of creating a duplicate.
-- **Database level**: The `idempotencyKey` column has a unique index (`WHERE "idempotencyKey" IS NOT NULL`), preventing duplicate entries even in concurrent scenarios.
-
-This guarantees that the same logical work (identified by an idempotency key) will not be queued multiple times.
-
-## Job Priority
-
-Jobs support four priority levels defined in `JobPriority` enum:
-
-| Priority  | Value |
-|-----------|-------|
-| CRITICAL  | 1     |
-| HIGH      | 5     |
-| NORMAL    | 10    |
-| LOW       | 20    |
-
-Lower numeric values indicate higher priority. BullMQ processes jobs in priority order.
-
-## Job Execution Timeout
-
-Each job has a **60-second execution timeout** (`JOB_TIMEOUT = 60,000 ms`) enforced via `Promise.race()`.
-
-**Important limitation**: The timeout using `Promise.race()` does not cancel the underlying Promise. If a job exceeds the timeout, a rejection is thrown and the job is marked as failed, but the underlying work continues to execute in the background. This is a fundamental limitation of Promise-based timeouts in JavaScript.
-
-Example:
-- Job submitted with `delay: 5000` → starts execution after 5 seconds
-- Job execution begins → timeout starts counting
-- If job takes > 60 seconds → timeout error is thrown → job marked as failed
-- Underlying promise continues executing in background (no cancellation)
-
-## Worker Concurrency
-
-The worker process handles multiple jobs concurrently. The concurrency level is configurable via the `WORKER_CONCURRENCY` environment variable (default: 5 concurrent jobs).
-
-**Separate processes**: The API server and worker are separate processes for resource isolation and independent scaling:
-- **API process**: Handles HTTP requests and job enqueueing
-- **Worker process**: Processes jobs from the queue
-
-This separation allows:
-- Independent scaling of job intake vs. processing capacity
-- Fault isolation (worker crashes don't bring down the API)
-- Dedicated resource allocation for long-running job execution
-
-## Graceful Shutdown
-
-Both API and worker processes implement graceful shutdown:
-
-- **API process**: Uses NestJS built-in shutdown hooks
-- **Worker process**: Calls `app.enableShutdownHooks()` to listen for SIGTERM/SIGINT, allowing:
-  - Worker to stop accepting new jobs
-  - Ongoing jobs to complete or timeout
-  - Connections (database, Redis) to close cleanly
-
-## Repository Pattern
-
-The `JobRepository` provides an abstraction layer over TypeORM and PostgreSQL:
-
-- Encapsulates all database queries and mutations
-- Provides named methods for domain operations (`markAsCompleted`, `markAsProcessing`, etc.)
-- Centralizes job persistence logic
-- Enables testing via mock repository implementations
-
-## Directory Structure
-
-```
-distributed-job-queue/
-├── src/
-│   ├── api/                      # HTTP API layer
-│   │   ├── jobs.controller.ts    # REST endpoints
-│   │   ├── jobs.service.ts       # Business logic
-│   │   ├── jobs.service.spec.ts  # Unit tests
-│   │   └── dto/
-│   │       ├── create-job.dto.ts
-│   │       └── job-response.dto.ts
-│   ├── database/                 # Data persistence
-│   │   ├── database.module.ts    # TypeORM configuration
-│   │   ├── entities/
-│   │   │   └── job.entity.ts     # JobEntity (PostgreSQL schema)
-│   │   └── repositories/
-│   │       └── job.repository.ts # Job CRUD & persistence
-│   ├── queue/                    # Job queueing
-│   │   ├── queue.module.ts
-│   │   └── queue.service.ts      # BullMQ & Redis integration
-│   ├── worker/                   # Job execution
-│   │   ├── worker.module.ts
-│   │   ├── worker.service.ts     # Worker lifecycle
-│   │   └── processors/
-│   │       ├── job.processor.ts  # Job execution logic
-│   │       └── job.processor.spec.ts # Unit tests
-│   ├── shared/
-│   │   ├── constants.ts          # JOB_TIMEOUT
-│   │   └── enums/
-│   │       ├── job-status.enum.ts
-│   │       └── job-priority.enum.ts
-│   ├── app.module.ts             # Root module
-│   ├── app.controller.ts
-│   ├── app.service.ts
-│   ├── main.ts                   # API server entry point
-│   └── worker-main.ts            # Worker entry point
-├── test/
-│   └── jest-e2e.json             # E2E test configuration
-├── infra/
-│   ├── Dockerfile                # Multi-stage build
-│   └── docker-compose.yml        # Production environment
-├── docker-compose.dev.yml        # Development environment
-├── package.json                  # Dependencies & scripts
-└── tsconfig.json                 # TypeScript configuration
-```
-
-## Local Development
-
-### Prerequisites
-- Node.js 24+ (Alpine compatible)
-- pnpm 9+
-- Docker & Docker Compose (for PostgreSQL and Redis)
-
-### Setup
-
-1. Install dependencies:
-```bash
-pnpm install
-```
-
-2. Start PostgreSQL and Redis:
-```bash
-docker-compose -f docker-compose.dev.yml up -d
-```
-
-3. In one terminal, start the API server:
-```bash
-pnpm run start:dev
-```
-
-4. In another terminal, start the worker:
-```bash
-pnpm run start:worker:dev
-```
-
-The API will be available at `http://localhost:3000`.
-
-### Development Commands
-
-```bash
-# Start API in watch mode
-pnpm run start:dev
-
-# Start worker in watch mode
-pnpm run start:worker:dev
-
-# Lint code
-pnpm run lint
-
-# Format code
-pnpm run format
-
-# Run unit tests
-pnpm run test
-
-# Run unit tests in watch mode
-pnpm run test:watch
-
-# View test coverage
-pnpm run test:cov
-```
-
-## Docker
-
-### Build
-
-The `infra/Dockerfile` uses a multi-stage build to minimize final image size:
-1. **Builder stage**: Installs dependencies and compiles TypeScript to JavaScript
-2. **Runner stage**: Uses only production dependencies
-
-```bash
-docker build -f infra/Dockerfile -t distributed-job-queue .
-```
-
-### Production Deployment with Docker Compose
-
-The `infra/docker-compose.yml` defines four services:
-
-| Service | Purpose |
-|---------|---------|
-| **postgres** | PostgreSQL 16 database for job persistence |
-| **redis** | Redis 7 queue backend for BullMQ |
-| **api** | NestJS API server (port 3000) |
-| **worker** | Job processing worker (consumer of main queue) |
-
-Start the full stack:
-```bash
-docker-compose -f infra/docker-compose.yml up -d
-```
-
-#### Environment Variables
-
-**API Service**:
-- `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` – PostgreSQL connection
-- `REDIS_HOST`, `REDIS_PORT` – Redis connection
-- `NODE_ENV` – Set to `production`
-- `PORT` – API server port (default: 3000)
-
-**Worker Service**:
-- `DB_*` – PostgreSQL connection (same as API)
-- `REDIS_HOST`, `REDIS_PORT` – Redis connection
-- `WORKER_CONCURRENCY` – Number of concurrent job processors (default: 5)
-
-#### Health Checks
-
-Both PostgreSQL and Redis include health checks. The API and worker depend on their health, ensuring the system is ready before processing requests or jobs.
-
-## REST API
-
-### Create a Job
-
-**Endpoint**: `POST /jobs`
-
-**Request Body**:
 ```json
 {
-  "type": "email",
-  "payload": {
-    "to": "user@example.com",
-    "subject": "Welcome",
-    "body": "Hello!"
-  },
-  "idempotencyKey": "unique-key-12345",
+  "type": "llm-inference",
+  "payload": { "prompt": "Summarize distributed queues" },
+  "idempotencyKey": "summary-123",
   "priority": 5,
   "maxAttempts": 3,
   "delay": 5000
 }
 ```
 
-**Parameters**:
-- `type` (string, required): Job type identifier (e.g., `email`)
-- `payload` (object, required): Job data passed to the processor
-- `idempotencyKey` (string, optional): Unique key for idempotent submissions
-- `priority` (number, optional): Priority level (1=CRITICAL, 5=HIGH, 10=NORMAL, 20=LOW). Default: 10
-- `maxAttempts` (number, optional): Maximum retry attempts. Default: 10
-- `delay` (number, optional): Delay in milliseconds before starting the job
+Fields:
 
-**Response** (HTTP 201):
+| Field | Type | Required | Description |
+|---|---|---:|---|
+| `type` | string | yes | Job type identifier. |
+| `payload` | object | yes | Data passed to the processor. |
+| `idempotencyKey` | string | no | Returns the existing job for repeated submissions. |
+| `priority` | `1 \| 5 \| 10 \| 20` | no | Defaults to `10`; lower values run first. |
+| `maxAttempts` | positive integer | no | Defaults to `10`. |
+| `delay` | non-negative integer | no | Delay before queue processing, in milliseconds. |
+
+Returns HTTP `201` with the job record:
+
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
-  "type": "email",
+  "type": "llm-inference",
   "status": "QUEUED",
   "priority": 5,
   "attempts": 0,
@@ -365,104 +98,133 @@ Both PostgreSQL and Redis include health checks. The API and worker depend on th
   "updatedAt": "2026-08-30T10:15:30.000Z",
   "processedAt": null,
   "completedAt": null,
-  "error": null
+  "error": null,
+  "result": null
 }
 ```
 
-**Example with curl**:
-```bash
-curl -X POST http://localhost:3000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "email",
-    "payload": {"to": "user@example.com"},
-    "idempotencyKey": "email-12345",
-    "priority": 5,
-    "maxAttempts": 3
-  }'
+### Get job status
+
+`GET /jobs/:id`
+
+The response includes `id`, `type`, `status`, `priority`, `attempts`, `maxAttempts`, timestamps, `error`, and `result`.
+
+## Job Lifecycle
+
+```text
+QUEUED -> PROCESSING -> COMPLETED
+                    \\-> FAILED -> retry with backoff -> PROCESSING
+                              \\-> DEAD_LETTER
 ```
 
-### Get Job Status
+The execution timeout is 60,000 ms. `Promise.race()` rejects on timeout but cannot cancel the underlying promise, so timed-out work may continue in the background.
 
-**Endpoint**: `GET /jobs/:id`
+## Local Development
 
-**Response**:
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "type": "email",
-  "status": "COMPLETED",
-  "priority": 5,
-  "attempts": 1,
-  "maxAttempts": 3,
-  "createdAt": "2026-08-30T10:15:30.000Z",
-  "updatedAt": "2026-08-30T10:15:35.000Z",
-  "processedAt": "2026-08-30T10:15:31.000Z",
-  "completedAt": "2026-08-30T10:15:35.000Z",
-  "error": null
-}
-```
+### Prerequisites
 
-**Example with curl**:
-```bash
-curl http://localhost:3000/jobs/550e8400-e29b-41d4-a716-446655440000
-```
+- Node.js 24+
+- pnpm 9+
+- Docker and Docker Compose
+- `GEMINI_API_KEY` for `llm-inference` jobs
 
-## Testing
-
-### Unit Tests
+### Setup
 
 ```bash
-# Run unit tests
+pnpm install
+docker compose -f docker-compose.dev.yml up -d
+pnpm run start:dev
+pnpm run start:worker:dev
+```
+
+The API listens on `http://localhost:3000`. Run the API and worker commands in separate terminals. The development compose file exposes PostgreSQL on `5432` and Redis on `6379` and uses the `pgvector/pgvector:pg16` image.
+
+The PostgreSQL initialization scripts create the pgvector extension and `llm_cache_entries` table. They run only when PostgreSQL initializes a new data volume; remove the development volume before reinitializing it.
+
+## Configuration
+
+Defaults are defined in the application code. Set these variables as needed:
+
+| Variable | Default | Used by |
+|---|---|---|
+| `PORT` | `3000` | API |
+| `DB_HOST` | `localhost` | API and worker |
+| `DB_PORT` | `5432` | API and worker |
+| `DB_USERNAME` | `postgres` | API and worker |
+| `DB_PASSWORD` | `postgres` | API and worker |
+| `DB_NAME` | `job_queue` | API and worker |
+| `DB_SYNC` | `false` | API and worker |
+| `DB_LOGGING` | `false` | API and worker |
+| `REDIS_HOST` | `localhost` | API and worker |
+| `REDIS_PORT` | `6379` | API and worker |
+| `WORKER_CONCURRENCY` | `5` | Worker |
+| `GEMINI_API_KEY` | empty | Worker |
+| `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` | Worker |
+| `GEMINI_COMPLETION_MODEL` | `gemini-2.5-flash` | Worker |
+| `CACHE_SIMILARITY_THRESHOLD` | `0.92` | Worker |
+| `CACHE_TTL_MS` | `86400000` | Worker |
+
+The Gemini provider uses the Google Generative Language REST API. Its rate limiter is local to each worker process and is not shared through Redis.
+
+## Database and Queue Details
+
+- PostgreSQL stores the `jobs` table through TypeORM.
+- Job payloads and results use PostgreSQL `jsonb`.
+- The `jobs` table has indexes for `(status, priority)` and non-null idempotency keys.
+- Redis contains the BullMQ `main-queue` and `dead-letter-queue` queues.
+- Semantic cache entries are managed with raw SQL because TypeORM does not provide first-class pgvector support.
+- Cache embeddings use `VECTOR(768)` and an IVFFlat cosine index.
+- Expired cache entries can be removed with `LlmCacheRepository.purgeExpired()`; no scheduler currently calls it.
+
+## Commands
+
+```bash
+pnpm run build
+pnpm run start:dev
+pnpm run start:worker:dev
+pnpm run lint
+pnpm run format
 pnpm run test
-
-# Run in watch mode
 pnpm run test:watch
-
-# Generate coverage report
 pnpm run test:cov
-```
-
-**Test Coverage**:
-- `jobs.service.spec.ts`: Tests job creation, idempotency detection, and status retrieval
-- `job.processor.spec.ts`: Tests job execution, retry logic, and dead-letter queue transitions
-
-**Example Tests**:
-- ✅ Creating and enqueueing a job
-- ✅ Idempotent job submission (returns existing job)
-- ✅ Job status retrieval
-- ✅ Successful job completion
-- ✅ Retry on failure with remaining attempts
-- ✅ Dead-letter queue transition when max attempts exceeded
-
-### E2E Tests
-
-```bash
 pnpm run test:e2e
 ```
 
-E2E tests use the Jest configuration in `test/jest-e2e.json`.
+TypeORM commands use `src/database/data-source.ts`:
+
+```bash
+pnpm run migration:generate -- src/database/migrations/Name
+pnpm run migration:run
+pnpm run migration:revert
+pnpm run migration:run:prod
+```
+
+## Docker Production Stack
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
+The production compose file runs PostgreSQL, Redis, the API, and the worker. The API is exposed on port `3000`. Both application containers wait for healthy PostgreSQL and Redis services. The worker receives Gemini and cache configuration from the compose environment, including `${GEMINI_API_KEY}`.
 
 ## Technology Stack
 
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| **Runtime** | Node.js | 24 (Alpine) |
-| **Framework** | NestJS | 11.x |
-| **Language** | TypeScript | 5.7.x |
-| **Database** | PostgreSQL | 16 |
-| **ORM** | TypeORM | 0.3.x |
-| **Queue** | BullMQ | 5.81.x |
-| **Cache/Queue Backend** | Redis | 7 |
-| **Redis Client** | ioredis | 5.11.x |
-| **Logging** | Pino | 10.x |
-| **Package Manager** | pnpm | 9.x |
-| **Testing** | Jest | 30.x |
-| **Linting** | ESLint | 9.x |
-| **Formatting** | Prettier | 3.x |
+| Area | Technology |
+|---|---|
+| Runtime | Node.js 24 |
+| Framework | NestJS 11 |
+| Language | TypeScript 5.7 |
+| Database | PostgreSQL 16 with pgvector |
+| ORM | TypeORM 0.3 |
+| Queue | BullMQ 5 with Redis 7 |
+| Redis client | ioredis 5 |
+| LLM and embeddings | Google Gemini REST API |
+| Validation | class-validator and class-transformer |
+| Logging | nestjs-pino, Pino, pino-pretty |
+| Testing | Jest 30, Supertest |
+| Linting and formatting | oxlint, Prettier |
+| Package manager | pnpm 9 |
 
 ## License
 
-This project is **private and unlicensed**. All source code and materials are proprietary and confidential. No rights are granted to copy, modify, distribute, or use this software without explicit written permission.
-
-See [LICENSE](LICENSE) for details.
+This project is private and unlicensed. See [LICENSE](LICENSE).
