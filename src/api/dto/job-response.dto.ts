@@ -13,4 +13,5 @@ export class JobResponseDto {
   processedAt?: Date;
   completedAt?: Date;
   error?: string;
+  result?: Record<string, any>;
 }

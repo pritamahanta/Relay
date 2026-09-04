@@ -1,6 +1,7 @@
 import { JobProcessor } from './job.processor';
 import { JobRepository } from '../../database/repositories/job.repository';
 import { QueueService } from '../../queue/queue.service';
+import { SemanticCacheService } from '../../llm/semantic-cache.service';
 
 describe('JobProcessor', () => {
   let processor: JobProcessor;
@@ -18,12 +19,17 @@ describe('JobProcessor', () => {
     moveToDLQ: jest.fn(),
   };
 
+  const semanticCacheService = {
+    getCompletion: jest.fn(),
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
 
     processor = new JobProcessor(
       jobRepository as unknown as JobRepository,
       queueService as unknown as QueueService,
+      semanticCacheService as unknown as SemanticCacheService,
     );
   });
 
@@ -52,7 +58,7 @@ describe('JobProcessor', () => {
 
     expect(
       jobRepository.markAsCompleted,
-    ).toHaveBeenCalledWith('job-1');
+    ).toHaveBeenCalledWith('job-1', undefined);
 
     expect(
       queueService.retryJob,
@@ -61,6 +67,62 @@ describe('JobProcessor', () => {
     expect(
       queueService.moveToDLQ,
     ).not.toHaveBeenCalled();
+  });
+
+  it('should complete an llm-inference job and persist its result', async () => {
+    const job = {
+      data: {
+        jobId: 'job-llm-1',
+        type: 'llm-inference',
+        payload: { prompt: 'what is a job queue?' },
+        attempts: 0,
+        maxAttempts: 3,
+      },
+    } as any;
+
+    semanticCacheService.getCompletion.mockResolvedValue({
+      response: 'a job queue is...',
+      cacheHit: true,
+      similarity: 0.98,
+    });
+
+    await processor.process(job);
+
+    expect(semanticCacheService.getCompletion).toHaveBeenCalledWith(
+      'what is a job queue?',
+    );
+
+    expect(jobRepository.markAsCompleted).toHaveBeenCalledWith(
+      'job-llm-1',
+      {
+        response: 'a job queue is...',
+        cacheHit: true,
+        similarity: 0.98,
+      },
+    );
+  });
+
+  it('should fail an llm-inference job with a missing prompt without calling the cache service', async () => {
+    const job = {
+      data: {
+        jobId: 'job-llm-2',
+        type: 'llm-inference',
+        payload: {},
+        attempts: 0,
+        maxAttempts: 3,
+      },
+    } as any;
+
+    await expect(processor.process(job)).rejects.toThrow(
+      'llm-inference job payload must include a non-empty "prompt" string',
+    );
+
+    expect(semanticCacheService.getCompletion).not.toHaveBeenCalled();
+
+    expect(jobRepository.markAsFailed).toHaveBeenCalledWith(
+      'job-llm-2',
+      'llm-inference job payload must include a non-empty "prompt" string',
+    );
   });
 
   it('should retry a failed job when attempts remain', async () => {

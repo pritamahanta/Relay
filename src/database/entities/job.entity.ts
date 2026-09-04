@@ -51,6 +51,9 @@ export class JobEntity {
   @Column({ type: 'text', nullable: true })
   error?: string;
 
+  @Column({ type: 'jsonb', nullable: true })
+  result?: Record<string, any>;
+
   @CreateDateColumn({ type: 'timestamp' })
   createdAt: Date;
 
