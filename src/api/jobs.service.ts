@@ -1,5 +1,4 @@
 import {
-  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -99,6 +98,7 @@ export class JobsService {
       processedAt: job.processedAt,
       completedAt: job.completedAt,
       error: job.error,
+      result: job.result,
     };
   }
 }

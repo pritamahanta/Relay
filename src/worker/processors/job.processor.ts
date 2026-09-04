@@ -8,6 +8,7 @@ import {
 
 import { JobRepository } from '../../database/repositories/job.repository';
 import { JOB_TIMEOUT } from '../../shared/constants';
+import { SemanticCacheService } from '../../llm/semantic-cache.service';
 
 @Injectable()
 export class JobProcessor {
@@ -16,6 +17,7 @@ export class JobProcessor {
   constructor(
     private readonly jobRepository: JobRepository,
     private readonly queueService: QueueService,
+    private readonly semanticCacheService: SemanticCacheService,
   ) {}
 
   async process(job: Job<QueueJobData>): Promise<void> {
@@ -41,13 +43,16 @@ export class JobProcessor {
     await this.jobRepository.markAsProcessing(jobId);
 
     try {
-      await this.executeWithTimeout(
+      const result = await this.executeWithTimeout(
         jobId,
-        (async () => {
+        (async (): Promise<Record<string, any> | undefined> => {
           switch (type) {
             case 'email':
               await this.processEmailJob(payload);
-              break;
+              return undefined;
+
+            case 'llm-inference':
+              return await this.processLlmInferenceJob(payload);
 
             // case 'fail':
             //   // Temporary failure type used to test retry/DLQ behavior.
@@ -64,11 +69,12 @@ export class JobProcessor {
 
             default:
               await this.processDefaultJob(payload);
+              return undefined;
           }
         })(),
       );
 
-      await this.jobRepository.markAsCompleted(jobId);
+      await this.jobRepository.markAsCompleted(jobId, result);
 
       this.logger.log(
         `Job ${jobId} completed successfully`,
@@ -113,10 +119,10 @@ export class JobProcessor {
     }
   }
 
-  private async executeWithTimeout(
+  private async executeWithTimeout<T>(
     jobId: string,
-    work: Promise<void>,
-  ): Promise<void> {
+    work: Promise<T>,
+  ): Promise<T> {
     let timeoutId: NodeJS.Timeout | undefined;
 
     const timeout = new Promise<never>((_, reject) => {
@@ -130,7 +136,7 @@ export class JobProcessor {
     });
 
     try {
-      await Promise.race([work, timeout]);
+      return await Promise.race([work, timeout]);
     } finally {
       if (timeoutId) {
         clearTimeout(timeoutId);
@@ -149,6 +155,27 @@ export class JobProcessor {
     await new Promise((resolve) =>
       setTimeout(resolve, 1000),
     );
+  }
+
+  private async processLlmInferenceJob(
+    payload: Record<string, any>,
+  ): Promise<Record<string, any>> {
+    const prompt = payload.prompt;
+
+    if (typeof prompt !== 'string' || prompt.trim().length === 0) {
+      throw new Error(
+        'llm-inference job payload must include a non-empty "prompt" string',
+      );
+    }
+
+    this.logger.log(
+      `Processing llm-inference job (prompt length: ${prompt.length})`,
+    );
+
+    const { response, cacheHit, similarity } =
+      await this.semanticCacheService.getCompletion(prompt);
+
+    return { response, cacheHit, similarity };
   }
 
   private async processDefaultJob(

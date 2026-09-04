@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 
 import { QueueModule } from '../queue/queue.module';
 import { DatabaseModule } from '../database/database.module';
+import { LlmModule } from '../llm/llm.module';
 
 import { WorkerService } from './worker.service';
 import { JobProcessor } from './processors/job.processor';
@@ -14,6 +15,7 @@ import { JobProcessor } from './processors/job.processor';
     }),
     QueueModule,
     DatabaseModule,
+    LlmModule,
   ],
   providers: [WorkerService, JobProcessor],
 })

@@ -81,10 +81,14 @@ export class JobRepository {
     });
   }
 
-  async markAsCompleted(id: string): Promise<void> {
+  async markAsCompleted(
+    id: string,
+    result?: Record<string, any>,
+  ): Promise<void> {
     await this.repository.update(id, {
       status: JobStatus.COMPLETED,
       completedAt: new Date(),
+      ...(result !== undefined ? { result } : {}),
     });
   }
 
