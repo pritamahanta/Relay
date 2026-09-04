@@ -17,7 +17,7 @@ import { JobRepository } from './repositories/job.repository';
         password: configService.get('DB_PASSWORD', 'postgres'),
         database: configService.get('DB_NAME', 'job_queue'),
         entities: [JobEntity],
-        synchronize: configService.get('DB_SYNC', true),
+        synchronize: configService.get('DB_SYNC', false),
         logging: configService.get('DB_LOGGING', false),
       }),
     }),
