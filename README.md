@@ -35,6 +35,29 @@ Worker <- Redis/BullMQ
 
 The API creates the PostgreSQL record before enqueueing the BullMQ job. The worker increments attempts, marks the job as processing, executes it, and marks it completed, failed, or dead-lettered.
 
+## Directory Structure
+
+```text
+src/
+  llm/
+    llm.module.ts
+    rate-limiter.spec.ts
+    rate-limiter.ts
+    semantic-cache.service.spec.ts
+    semantic-cache.service.ts
+    interfaces/
+      embedding-provider.interface.ts
+      llm-provider.interface.ts
+    providers/
+      gemini.provider.ts
+  database/
+    repositories/
+      llm-cache.repository.ts
+infra/
+  init-db/
+    02-llm-cache-table.sql
+```
+
 ## Features by Job Type
 
 ### Generic jobs
@@ -55,6 +78,23 @@ Requires a non-empty `payload.prompt`. The worker:
 4. Calls Gemini on a cache miss and stores the response for `CACHE_TTL_MS`.
 
 The job result contains `response`, `cacheHit`, and, for cache hits, `similarity`.
+
+## LLM Semantic Cache
+
+The `llm-inference` job type is implemented by `src/llm/`. It requires a non-empty `payload.prompt`. The Gemini provider first creates a 768-dimensional embedding, then `LlmCacheRepository` searches non-expired `llm_cache_entries` rows with pgvector cosine similarity. A cache entry is used when its similarity is at least `CACHE_SIMILARITY_THRESHOLD`; otherwise, the provider requests a Gemini completion and stores the prompt, embedding, response, and expiration time using `CACHE_TTL_MS`. The cache table and its IVFFlat cosine index are created by `infra/init-db/02-llm-cache-table.sql`.
+
+Both embedding and completion requests acquire a slot from the in-memory token-bucket limiter in `src/llm/rate-limiter.ts`. Each worker process has 12 tokens per 60-second window; when the bucket is empty, the request waits for the current window to refill. The limiter is not shared between worker processes.
+
+Submit an `llm-inference` job with:
+
+```bash
+curl -X POST http://localhost:3000/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type": "llm-inference",
+    "payload": { "prompt": "Summarize distributed queues" }
+  }'
+```
 
 ## API
 
@@ -118,6 +158,12 @@ QUEUED -> PROCESSING -> COMPLETED
 ```
 
 The execution timeout is 60,000 ms. `Promise.race()` rejects on timeout but cannot cancel the underlying promise, so timed-out work may continue in the background.
+
+## Reliability
+
+- Idempotent job submission is race-safe against concurrent duplicate requests. `JobsService.createJob` handles the PostgreSQL unique-constraint violation on `idempotencyKey` and returns the job created by the winning request.
+- `WorkerService` listens for BullMQ `failed` events and reconciles jobs that stall or crash while marked `PROCESSING`, including retry or DLQ handling when they never reach `JobProcessor`'s own retry/DLQ logic.
+- Job timeouts do not cancel the underlying work. The 60-second timeout rejects the job's `Promise.race()`, but the original promise may continue running in the background.
 
 ## Local Development
 
@@ -199,6 +245,10 @@ pnpm run migration:revert
 pnpm run migration:run:prod
 ```
 
+## Testing
+
+The `test/jobs.e2e-spec.ts` suite covers job creation and retrieval, request validation, sequential idempotency, and a real concurrent-request race test for duplicate idempotency keys. CI runs these e2e tests against real PostgreSQL and Redis service containers defined in `.github/workflows/ci.yml`.
+
 ## Docker Production Stack
 
 ```bash
@@ -215,10 +265,11 @@ The production compose file runs PostgreSQL, Redis, the API, and the worker. The
 | Framework | NestJS 11 |
 | Language | TypeScript 5.7 |
 | Database | PostgreSQL 16 with pgvector |
+| Vector search | pgvector |
 | ORM | TypeORM 0.3 |
 | Queue | BullMQ 5 with Redis 7 |
 | Redis client | ioredis 5 |
-| LLM and embeddings | Google Gemini REST API |
+| LLM API and embeddings | Google Gemini REST API |
 | Validation | class-validator and class-transformer |
 | Logging | nestjs-pino, Pino, pino-pretty |
 | Testing | Jest 30, Supertest |
