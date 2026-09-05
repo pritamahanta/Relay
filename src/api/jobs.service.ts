@@ -3,12 +3,18 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { QueryFailedError } from 'typeorm';
 
+import { JobEntity } from '../database/entities/job.entity';
 import { JobRepository } from '../database/repositories/job.repository';
 import { QueueService } from '../queue/queue.service';
 
 import { CreateJobDto } from './dto/create-job.dto';
 import { JobResponseDto } from './dto/job-response.dto';
+
+// Postgres error code for a unique_violation (e.g. our unique index on
+// idempotencyKey). See https://www.postgresql.org/docs/current/errcodes-appendix.html
+const POSTGRES_UNIQUE_VIOLATION = '23505';
 
 @Injectable()
 export class JobsService {
@@ -22,7 +28,7 @@ export class JobsService {
   async createJob(
     dto: CreateJobDto,
   ): Promise<JobResponseDto> {
-    // Check whether this request was already processed.
+    
     if (dto.idempotencyKey) {
       const existing =
         await this.jobRepository.findByIdempotencyKey(
@@ -38,24 +44,56 @@ export class JobsService {
       }
     }
 
-    // Create the persistent job first.
-    const job = await this.jobRepository.createJob(dto);
+    let job: JobEntity;
 
     try {
-      // Then enqueue the job.
+      job = await this.jobRepository.createJob(dto);
+    } catch (error) {
+      if (
+        dto.idempotencyKey &&
+        this.isUniqueViolation(error)
+      ) {
+        const winner =
+          await this.jobRepository.findByIdempotencyKey(
+            dto.idempotencyKey,
+          );
+
+        if (winner) {
+          this.logger.log(
+            `Lost idempotency insert race, returning existing job: ${dto.idempotencyKey}`,
+          );
+
+          return this.mapToResponse(winner);
+        }
+      }
+
+      throw error;
+    }
+
+    try {
       await this.queueService.addJob(
         job.id,
         job.type,
         job.payload,
-      {
-        priority: job.priority,
-        delay: job.delay,
-        maxAttempts: job.maxAttempts,
-      },  
-    );
+        {
+          priority: job.priority,
+          delay: job.delay,
+          maxAttempts: job.maxAttempts,
+        },
+      );
     } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error';
+
       this.logger.error(
-        `Failed to enqueue job ${job.id}`,
+        `Failed to enqueue job ${job.id}: ${errorMessage}`,
+      );
+
+      await this.jobRepository.markAsFailed(
+        job.id,
+        `Failed to enqueue: ${errorMessage}`,
       );
 
       throw error;
@@ -66,6 +104,14 @@ export class JobsService {
     );
 
     return this.mapToResponse(job);
+  }
+
+  private isUniqueViolation(error: unknown): boolean {
+    return (
+      error instanceof QueryFailedError &&
+      (error as unknown as { code?: string }).code ===
+        POSTGRES_UNIQUE_VIOLATION
+    );
   }
 
   async getJobStatus(
@@ -84,7 +130,7 @@ export class JobsService {
   }
 
   private mapToResponse(
-    job: any,
+    job: JobEntity,
   ): JobResponseDto {
     return {
       id: job.id,
