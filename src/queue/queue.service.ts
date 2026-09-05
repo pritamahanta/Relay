@@ -8,6 +8,7 @@ import { Job, Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 
 import { JobRepository } from '../database/repositories/job.repository';
+import { JOB_TIMEOUT } from '../shared/constants';
 
 const MAIN_QUEUE = 'main-queue';
 const DLQ = 'dead-letter-queue';
@@ -22,8 +23,7 @@ export interface QueueJobData {
 
 @Injectable()
 export class QueueService
-  implements OnModuleInit, OnModuleDestroy
-{
+  implements OnModuleInit, OnModuleDestroy {
   private connection!: Redis;
   private mainQueue!: Queue<QueueJobData>;
   private dlQueue!: Queue<QueueJobData>;
@@ -31,7 +31,7 @@ export class QueueService
   constructor(
     private readonly configService: ConfigService,
     private readonly jobRepository: JobRepository,
-  ) {}
+  ) { }
 
   async onModuleInit(): Promise<void> {
     const redisHost = this.configService.get(
@@ -71,30 +71,30 @@ export class QueueService
     await this.connection.quit();
   }
 
-async addJob(
-  jobId: string,
-  type: string,
-  payload: Record<string, any>,
-  options: {
-    priority?: number;
-    delay?: number;
-    maxAttempts?: number;
-  } = {},
-): Promise<void> {
-  const jobData: QueueJobData = {
-    jobId,
-    type,
-    payload,
-    attempts: 0,
-    maxAttempts: options.maxAttempts ?? 10,
-  };
+  async addJob(
+    jobId: string,
+    type: string,
+    payload: Record<string, any>,
+    options: {
+      priority?: number;
+      delay?: number;
+      maxAttempts?: number;
+    } = {},
+  ): Promise<void> {
+    const jobData: QueueJobData = {
+      jobId,
+      type,
+      payload,
+      attempts: 0,
+      maxAttempts: options.maxAttempts ?? 10,
+    };
 
-  await this.mainQueue.add(type, jobData, {
-    jobId,
-    priority: options.priority,
-    delay: options.delay,
-  });
-}
+    await this.mainQueue.add(type, jobData, {
+      jobId,
+      priority: options.priority,
+      delay: options.delay,
+    });
+  }
 
   private calculateBackoff(
     attemptNumber: number,
@@ -142,23 +142,28 @@ async addJob(
     );
   }
 
- createWorker(
-  processor: (
-    job: Job<QueueJobData>,
-  ) => Promise<void>,
-): Worker<QueueJobData> {
-  const concurrency = parseInt(
-    this.configService.get('WORKER_CONCURRENCY', '5'),
-    10,
-  );
+  createWorker(
+    processor: (
+      job: Job<QueueJobData>,
+    ) => Promise<void>,
+  ): Worker<QueueJobData> {
+    const concurrency = parseInt(
+      this.configService.get('WORKER_CONCURRENCY', '5'),
+      10,
+    );
 
-  return new Worker<QueueJobData>(
-    MAIN_QUEUE,
-    processor,
-    {
-      connection: this.connection,
-      concurrency,
-    },
-  );
-}
+    return new Worker<QueueJobData>(
+      MAIN_QUEUE,
+      processor,
+      {
+        connection: this.connection,
+        concurrency,
+
+        lockDuration: JOB_TIMEOUT + 15_000,
+        stalledInterval: 30_000,
+
+        maxStalledCount: 2,
+      },
+    );
+  }
 }
