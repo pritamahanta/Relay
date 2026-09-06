@@ -206,7 +206,7 @@ Defaults are defined in the application code. Set these variables as needed:
 | `WORKER_CONCURRENCY` | `5` | Worker |
 | `GEMINI_API_KEY` | empty | Worker |
 | `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` | Worker |
-| `GEMINI_COMPLETION_MODEL` | `gemini-2.5-flash` | Worker |
+| `GEMINI_COMPLETION_MODEL` | `gemini-3.6-flash` | Worker |
 | `CACHE_SIMILARITY_THRESHOLD` | `0.92` | Worker |
 | `CACHE_TTL_MS` | `86400000` | Worker |
 
@@ -248,6 +248,32 @@ pnpm run migration:run:prod
 ## Testing
 
 The `test/jobs.e2e-spec.ts` suite covers job creation and retrieval, request validation, sequential idempotency, and a real concurrent-request race test for duplicate idempotency keys. CI runs these e2e tests against real PostgreSQL and Redis service containers defined in `.github/workflows/ci.yml`.
+
+### Load testing
+
+Load-test scripts and recorded results are in [`test/load`](test/load):
+
+- [`k6-ingest.js`](test/load/k6-ingest.js) measures API ingestion throughput with an open-model constant arrival rate.
+- [`idempotency-race.js`](test/load/idempotency-race.js) sends concurrent duplicate submissions with one `idempotencyKey`.
+- [`results.md`](test/load/results.md) contains the measured runs and analysis.
+
+Run the ingestion test against a running API with k6:
+
+```bash
+docker run --rm --network host -i grafana/k6 run \
+  --env BASE_URL=http://localhost:3000 --env RATE=750 --env DURATION=60s --env BATCH=ingest-1 \
+  - < test/load/k6-ingest.js
+```
+
+Run the idempotency race test with Node.js:
+
+```bash
+node test/load/idempotency-race.js
+CONCURRENCY=1000 node test/load/idempotency-race.js
+CONCURRENCY=2000 node test/load/idempotency-race.js
+```
+
+The recorded local results sustained 750 job submissions/sec for 60 seconds with 0% HTTP errors and approximately 4 ms p95 ingestion latency. The idempotency test returned one job ID and only HTTP 201 responses at 500, 1,000, and 2,000 concurrent duplicate submissions; database verification found one row for each key. These are ingestion and idempotency measurements, not end-to-end worker throughput benchmarks.
 
 ## Docker Production Stack
 
