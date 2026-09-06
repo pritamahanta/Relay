@@ -34,7 +34,7 @@ export class GeminiProvider implements EmbeddingProvider, LlmProvider {
     );
     this.completionModel = this.configService.get(
       'GEMINI_COMPLETION_MODEL',
-      'gemini-2.5-flash',
+      'gemini-3.6-flash',
     );
 
     if (!this.apiKey) {

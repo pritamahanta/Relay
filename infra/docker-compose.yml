@@ -77,7 +77,7 @@ services:
 
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_EMBEDDING_MODEL: gemini-embedding-001
-      GEMINI_COMPLETION_MODEL: gemini-2.5-flash
+      GEMINI_COMPLETION_MODEL: gemini-3.6-flash
       CACHE_SIMILARITY_THRESHOLD: "0.92"
       CACHE_TTL_MS: "86400000"
     depends_on:
